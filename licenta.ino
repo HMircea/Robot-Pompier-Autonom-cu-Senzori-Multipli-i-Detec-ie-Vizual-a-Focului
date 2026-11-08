@@ -1,59 +1,53 @@
 // Pini L298N
-#define IN1 7   // motor stânga
+#define IN1 7
 #define IN2 8
-#define IN3 9   // motor dreapta
+#define IN3 9
 #define IN4 10
 #define BUZZER 6
 
-// Pini senzor HC-SR04
+// HC-SR04
 #define TRIG 11
 #define ECHO 12
 
-#define DIST_OBSTACOL 20
+#define DIST_OBSTACOL 20   // cm
 
-// ---------- CALIBRARE (ajustează pe robot) ----------
-#define TIMP_SPATE   350   // ms cât dă înapoi după obstacol
-#define TIMP_90      450   // ms pentru viraj de 90° pe loc
-#define TIMP_PAS     400   // ms înainte ≈ 5 cm (pune lățimea robotului dacă vrei fără suprapunere)
+// ---------- CALIBRARE ----------
+#define TIMP_SPATE      400    // ms înapoi după obstacol
+#define TIMP_VIRAJ_MIN  300    // ms viraj minim (~50-60°)
+#define TIMP_VIRAJ_MAX  900    // ms viraj maxim (~160-180°)
 
-bool urmatorulDreapta = true;   // true = următorul viraj e dreapta, false = stânga
+bool ultimaDreapta = true;
+int  obstacoleLaRand = 0;
+unsigned long ultimulObstacol = 0;
 
 void setup() {
   Serial.begin(9600);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
   pinMode(BUZZER, OUTPUT);
+  pinMode(TRIG, OUTPUT); pinMode(ECHO, INPUT);
   digitalWrite(BUZZER, LOW);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  pinMode(TRIG, OUTPUT);
-  pinMode(ECHO, INPUT);
   opreste();
+  randomSeed(analogRead(A0));
   delay(1000);
 }
 
-// ---------- Motoare individuale ----------
+// ---------- Motoare ----------
 void stanga(bool fata) {
   digitalWrite(IN1, fata ? HIGH : LOW);
   digitalWrite(IN2, fata ? LOW : HIGH);
 }
-
 void dreapta(bool fata) {
   digitalWrite(IN3, fata ? LOW : HIGH);
   digitalWrite(IN4, fata ? HIGH : LOW);
 }
-
-// ---------- Mișcări ----------
 void inainte()     { stanga(true);  dreapta(true);  }
 void inapoi()      { stanga(false); dreapta(false); }
 void viraStanga()  { stanga(false); dreapta(true);  }
 void viraDreapta() { stanga(true);  dreapta(false); }
-
 void opreste() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
 }
 
 // ---------- Senzor ----------
@@ -63,7 +57,6 @@ long masoaraDistanta() {
   digitalWrite(TRIG, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG, LOW);
-
   long durata = pulseIn(ECHO, HIGH, 30000);
   if (durata == 0) return 400;
   return durata * 0.034 / 2;
@@ -81,58 +74,47 @@ long distantaFiltrata() {
 // ---------- Utilitare ----------
 void bip(int ori, int durata) {
   for (int i = 0; i < ori; i++) {
-    digitalWrite(BUZZER, HIGH);
-    delay(durata);
-    digitalWrite(BUZZER, LOW);
-    delay(100);
+    digitalWrite(BUZZER, HIGH); delay(durata);
+    digitalWrite(BUZZER, LOW);  delay(100);
   }
 }
 
-void viraj90(bool spreDreapta) {
+void vireaza(bool spreDreapta, int ms) {
   if (spreDreapta) viraDreapta();
   else             viraStanga();
-  delay(TIMP_90);
+  delay(ms);
   opreste();
-  delay(200);
+  delay(150);
 }
 
-// Camera acoperită: oprește definitiv
-void gata() {
+// ---------- Evitare obstacol ----------
+void eviteObstacol() {
   opreste();
-  bip(5, 400);
-  while (true) { }
-}
+  bip(1, 100);
 
-// ---------- Schimbare culoar (serpentină) ----------
-void schimbaCuloar() {
-  opreste();
-  bip(1, 150);
-
-  // 1. dă puțin înapoi
   inapoi();
   delay(TIMP_SPATE);
   opreste();
-  delay(200);
+  delay(150);
 
-  // 2. primul viraj de 90°
-  viraj90(urmatorulDreapta);
+  // direcție random, cu tendință să alterneze (acoperire mai uniformă)
+  bool dreapta = (random(100) < 65) ? !ultimaDreapta : ultimaDreapta;
+  ultimaDreapta = dreapta;
 
-  // 3. dacă imediat în lateral e perete => am ajuns în colțul opus, gata
-  if (distantaFiltrata() < DIST_OBSTACOL) {
-    gata();
+  // unghi random; dacă dă mereu în obstacole (colț), viraj mare
+  int ms = random(TIMP_VIRAJ_MIN, TIMP_VIRAJ_MAX);
+  if (obstacoleLaRand >= 3) {
+    ms = TIMP_VIRAJ_MAX + 200;   // aprox. întoarcere completă
+    obstacoleLaRand = 0;
   }
+  vireaza(dreapta, ms);
 
-  // 4. pas lateral ≈ 5 cm
-  inainte();
-  delay(TIMP_PAS);
-  opreste();
-  delay(200);
-
-  // 5. al doilea viraj de 90° în aceeași parte => acum merge în sens opus
-  viraj90(urmatorulDreapta);
-
-  // 6. data viitoare virează în partea cealaltă
-  urmatorulDreapta = !urmatorulDreapta;
+  // dacă încă e obstacol în față, mai virează în pași mici
+  int incercari = 0;
+  while (distantaFiltrata() < DIST_OBSTACOL && incercari < 10) {
+    vireaza(dreapta, 200);
+    incercari++;
+  }
 }
 
 // ---------- Program principal ----------
@@ -141,7 +123,12 @@ void loop() {
   Serial.println(d);   // DEBUG: șterge după ce merge
 
   if (d < DIST_OBSTACOL) {
-    schimbaCuloar();
+    // obstacole la mai puțin de 3 s unul de altul = probabil colț
+    if (millis() - ultimulObstacol < 3000) obstacoleLaRand++;
+    else                                   obstacoleLaRand = 0;
+    ultimulObstacol = millis();
+
+    eviteObstacol();
   } else {
     inainte();
   }
